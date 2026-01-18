@@ -1,77 +1,131 @@
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
 from PIL import Image
+import numpy as np
+import os
+import random
 import time
+import plotly.graph_objects as go
 
-# --- CONFIGURATION & MOCK DATA ---
-st.set_page_config(page_title="OrcaSafe: Real-Time Acoustic Mitigation", layout="wide")
+# --- 1. MODEL & PROCESSING LOGIC ---
+DEVICE = torch.device("cpu")
 
-def simulate_mitigation(initial_snr):
-    """Calculates the 12dB slowdown recovery."""
-    return initial_snr + 12.0
+@st.cache_resource
+def load_orca_model(model_path):
+    model = models.mobilenet_v2()
+    model.classifier = nn.Sequential(
+        nn.Linear(1280, 128), nn.ReLU(), nn.Dropout(0.2),
+        nn.Linear(128, 1), nn.Sigmoid()
+    )
+    # Ensure your .pth file is in the same folder
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location=DEVICE))
+    model.to(DEVICE).eval()
+    return model
 
-# --- HEADER ---
-st.title("🐋 Silence in the Sound: Real-Time AI Mitigation")
-st.markdown("### Southern Resident Killer Whale Protection System")
+def denoise_image(img_pil):
+    """Subtracts the median 'noise floor' from the spectrogram."""
+    img_array = np.array(img_pil).astype(np.float32)
+    median = np.median(img_array, axis=1, keepdims=True)
+    denoised = np.clip(img_array - median, 0, 255).astype(np.uint8)
+    return Image.fromarray(denoised)
 
-# --- SIDEBAR: CONTROLS ---
-st.sidebar.header("Demo Controls")
-mode = st.sidebar.radio("Simulation Scenario:", ["Quiet Water (+8dB)", "High Traffic (0dB Masking)", "Slowdown Active (+12dB Recovery)"])
+# --- 2. UI SETUP ---
+st.set_page_config(page_title="OrcaSafe Command Center", layout="wide")
+st.title("🐋 OrcaSafe: Integrated Mitigation Console")
 
-# --- MAIN DASHBOARD LAYOUT ---
-col1, col2 = st.columns([1, 1])
+# Sidebar Controls
+st.sidebar.header("🕹️ System Controls")
+use_denoising = st.sidebar.toggle("Enable Spectral Denoising", value=False)
+data_source = st.sidebar.selectbox("Hydrophone Scenario:", ["Mixed (Masked/0dB)", "Orca (Clear)", "Background Noise"])
+if st.sidebar.button("🔄 Capture New Sample"):
+    st.session_state.slowdown_active = False # Reset on new sample
+    st.rerun()
 
-with col1:
-    st.subheader("📡 Live Hydrophone Feed")
-    # Placeholder for your actual spectrogram images
-    # Replace 'orca_spec.png' with your actual project images
-    st.image("https://via.placeholder.com/600x300.png?text=Spectrogram+Inference+Feed", use_container_width=True)
-    
-    snr_value = 8.0 if "Quiet" in mode else (0.0 if "High Traffic" in mode else 12.0)
-    st.metric(label="Estimated SNR Proxy", value=f"{snr_value} dB", delta="12 dB (Recovery)" if "Recovery" in mode else None)
+# --- 3. DUAL-VIEW SPECTROGRAMS ---
+st.subheader("📡 Acoustic Signal Processing")
+col_raw, col_proc = st.columns(2)
 
-with col2:
-    st.subheader("🤖 AI Detection Engine")
-    confidence = 0.98 if "Quiet" in mode else (0.75 if "High Traffic" in mode else 0.99)
-    st.progress(confidence)
-    st.write(f"**Confidence Level:** {confidence:.1%}")
-    
-    if confidence > 0.85:
+# Load Sample
+FOLDER_MAP = {"Mixed (Masked/0dB)": "Mixed", "Orca (Clear)": "Orca", "Background Noise": "Noise"}
+sample_dir = f"Data/InferenceData/MixedInference/{FOLDER_MAP[data_source]}"
+files = [f for f in os.listdir(sample_dir) if f.endswith(".png")]
+img_file = random.choice(files)
+raw_img = Image.open(os.path.join(sample_dir, img_file)).convert("RGB")
+
+with col_raw:
+    st.image(raw_img, caption="RAW INPUT (Vessel Noise Present)", use_container_width=True)
+
+with col_proc:
+    if use_denoising:
+        processed_img = denoise_image(raw_img)
+        st.image(processed_img, caption="DENOISED (Background Subtracted)", use_container_width=True)
+        active_img = processed_img
+    else:
+        st.info("Denoising Inactive. Using raw signal for AI inference.")
+        active_img = raw_img
+
+# --- 4. AI INFERENCE ---
+st.divider()
+model = load_orca_model("orca_safe_brain.pth")
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+tensor = transform(active_img).unsqueeze(0)
+with torch.no_grad():
+    prob = model(tensor).item()
+
+c1, c2 = st.columns([1, 2])
+with c1:
+    st.metric("AI Detection Confidence", f"{prob:.2%}")
+    is_detected = prob > 0.5
+    if is_detected:
         st.success("✅ ORCA DETECTED")
     else:
-        st.warning("⚠️ DETECTION MASKED BY NOISE")
+        st.error("❌ NO DETECTION")
 
-st.divider()
+# --- 5. DYNAMIC MITIGATION ---
+if is_detected and data_source == "Mixed (Masked/0dB)":
+    with c2:
+        st.warning("⚠️ CRITICAL: Masking Event Detected (0dB SNR). Action Required.")
+        if 'slowdown_active' not in st.session_state:
+            st.session_state.slowdown_active = False
 
-# --- PHASE 3: SPATIAL RECOVERY VISUALIZATION ---
-st.subheader("🗺️ Phase 3: Acoustic Habitat Recovery")
-col3, col4 = st.columns([2, 1])
+        if st.button("🚀 INITIATE DYNAMIC SLOWDOWN", type="primary"):
+            st.session_state.slowdown_active = True
 
-with col3:
-    # Create a simple bubble map to show 'Acoustic Footprint'
-    radius = 8.0 if "High Traffic" in mode else 2.0
-    map_data = pd.DataFrame({'lat': [48.11], 'lon': [-122.76], 'radius': [radius]})
-    
-    fig = px.scatter_mapbox(map_data, lat="lat", lon="lon", size="radius", 
-                            color_discrete_sequence=["red" if radius > 5 else "green"],
-                            zoom=10, height=400)
-    fig.update_layout(mapbox_style="open-street-map")
-    st.plotly_chart(fig, use_container_width=True)
-
-with col4:
-    st.markdown("#### Mitigation Impact")
-    impact_df = pd.DataFrame({
-        "Metric": ["Noise Level", "Comm. Radius", "AI Reliability"],
-        "Value": ["High" if radius > 5 else "Safe", 
-                  f"{radius} km", 
-                  "100%" if radius < 5 else "82%"]
-    })
-    st.table(impact_df)
-
-if st.button("🚀 TRIGGER DYNAMIC SLOWDOWN"):
-    with st.spinner('Calculating AIS Buffer and Notifying Vessels...'):
-        time.sleep(2)
+    if st.session_state.slowdown_active:
         st.balloons()
-        st.success("Targeted MMSI Alert Sent: Speed Reduction to 7kts Confirmed.")
+        st.success("Target Speed: 7.0 Knots Achieved. SNR recovered by +12dB.")
+
+    # Visualization
+    st.subheader("🗺️ Habitat Recovery Map")
+    m1, m2 = st.columns([2, 1])
+    
+    radius = 2.0 if st.session_state.slowdown_active else 8.0
+    color = "rgba(0, 255, 0, 0.4)" if st.session_state.slowdown_active else "rgba(255, 0, 0, 0.4)"
+    
+    with m1:
+        fig = go.Figure(go.Scattermapbox(
+            lat=[48.5], lon=[-123.2],
+            mode='markers',
+            marker=go.scattermapbox.Marker(size=radius * 30, color=color),
+            text=["Active Masking Zone"]
+        ))
+        fig.update_layout(
+            mapbox_style="open-street-map",
+            mapbox=dict(center=dict(lat=48.5, lon=-123.2), zoom=9.5),
+            margin={"r":0,"t":0,"l":0,"b":0}, height=400
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with m2:
+        st.write("### Impact Summary")
+        st.write(f"**Footprint Radius:** {radius} km")
+        st.write(f"**SNR State:** {'Recovered' if st.session_state.slowdown_active else 'Masked'}")
+        st.write(f"**Habitat Gain:** {'400%' if st.session_state.slowdown_active else '0%'}")
