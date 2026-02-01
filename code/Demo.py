@@ -1,3 +1,4 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -5,28 +6,70 @@ import torch
 import torch.nn as nn
 from torchvision import models, transforms
 from PIL import Image
-import os
 import random
 import asyncio
 import websockets
 import json
-from pyproj import Transformer
+import boto3
+from botocore import UNSIGNED
+from botocore.config import Config
+import librosa
+import librosa.display
+import io
+import time
+import subprocess
+import matplotlib.pyplot as plt
+from math import radians, cos, sin, asin, sqrt
 
-# --- AIS SHIP TYPE MAPPING ---
-# Translates AIS numerical codes into human-readable categories
+# --- CONFIGURATION ---
+FFMPEG_BINARY = "/opt/homebrew/bin/ffmpeg"
 SHIP_TYPE_MAP = {
-    70: "Cargo", 71: "Cargo (Haz A)", 72: "Cargo (Haz B)", 73: "Cargo (Haz C)", 
-    74: "Cargo (Haz D)", 79: "Cargo (General)", 80: "Tanker", 81: "Tanker (Haz A)",
-    82: "Tanker (Haz B)", 83: "Tanker (Haz C)", 84: "Tanker (Haz D)", 89: "Tanker (General)",
-    60: "Passenger", 61: "Passenger (Haz A)", 62: "Passenger (Haz B)", 63: "Passenger (Haz C)",
-    64: "Passenger (Haz D)", 69: "Passenger (General)"
+    70: "Cargo", 71: "Cargo (Haz A)", 80: "Tanker", 60: "Passenger", 0: "Unknown"
 }
 
+# --- MODULE 1: DATA FETCHER ---
+class QuiltS3Fetcher:
+    def __init__(self):
+        self.bucket_name = "audio-orcasound-net"
+        self.prefix = "rpi_port_townsend/hls/"
+        self.s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
 
-# --- MODULE 1: ACOUSTIC ENGINE (AI DETECTION) ---
+    def get_latest_spectrogram(self):
+        try:
+            lookback_start = int(time.time()) - (24 * 60 * 60)
+            start_after_key = f"{self.prefix}{lookback_start}.ts"
+            paginator = self.s3.get_paginator('list_objects_v2')
+            page_iterator = paginator.paginate(Bucket=self.bucket_name, Prefix=self.prefix, StartAfter=start_after_key)
+            
+            latest_obj = None
+            for page in page_iterator:
+                if "Contents" in page: latest_obj = page['Contents'][-1]
+            
+            if not latest_obj or latest_obj['Size'] < 1000: return None, None
+            
+            ts_file, wav_file = 'live_capture.ts', 'live_capture.wav'
+            self.s3.download_file(self.bucket_name, latest_obj['Key'], ts_file)
+            
+            subprocess.run([FFMPEG_BINARY, '-v', 'error', '-i', ts_file, '-ar', '22050', '-ac', '1', wav_file, '-y'], capture_output=True)
+
+            y, sr = librosa.load(wav_file, sr=22050)
+            S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=10000)
+            S_dB = librosa.power_to_db(S, ref=np.max)
+
+            fig, ax = plt.subplots(figsize=(5, 5))
+            plt.axis('off')
+            librosa.display.specshow(S_dB, sr=sr, fmax=10000, ax=ax, cmap='magma')
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
+            plt.close(fig)
+            buf.seek(0)
+            return Image.open(buf).convert("RGB"), latest_obj['LastModified']
+        except: return None, None
+
+# --- MODULE 2: AI ENGINE ---
 class AcousticEngine:
     def __init__(self, model_path):
-        self.device = torch.device("cpu")
+        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
         self.model = self._load_model(model_path)
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -36,214 +79,147 @@ class AcousticEngine:
 
     def _load_model(self, path):
         model = models.mobilenet_v2()
-        model.classifier = nn.Sequential(
-            nn.Linear(1280, 128), nn.ReLU(), nn.Dropout(0.2),
-            nn.Linear(128, 1), nn.Sigmoid()
-        )
-        if os.path.exists(path):
-            model.load_state_dict(torch.load(path, map_location=self.device))
+        model.classifier = nn.Sequential(nn.Linear(1280, 128), nn.ReLU(), nn.Dropout(0.2), nn.Linear(128, 1), nn.Sigmoid())
+        if os.path.exists(path): model.load_state_dict(torch.load(path, map_location=self.device))
         return model.to(self.device).eval()
 
     def run_inference(self, img):
         tensor = self.transform(img).unsqueeze(0).to(self.device)
-        with torch.no_grad():
-            return self.model(tensor).item()
+        with torch.no_grad(): return self.model(tensor).item()
 
-    @staticmethod
-    def calculate_visual_snr(img, signal_band=(0.3, 0.6), noise_band=(0.0, 0.2)):
-        """
-        Relative spectrogram SNR proxy using energy ratios (Decibel Scale).
-        Replaces linear mean subtraction with Logarithmic Ratio for better acoustic accuracy.
-        """
-        # Convert to grayscale and resize to match model input dimensions
-        img_gray = np.array(img.convert('L').resize((224, 224)))
-        
-        # Determine frequency axis boundaries
-        F = img_gray.shape[0]
-        sig_lo, sig_hi = int(signal_band[0] * F), int(signal_band[1] * F)
-        noi_lo, noi_hi = int(noise_band[0] * F), int(noise_band[1] * F)
-
-        # Calculate Energy (Mean of squared pixel intensities)
-        # Adding 1e-6 to avoid log(0) or division by zero errors
-        signal_energy = np.mean(img_gray[sig_lo:sig_hi, :] ** 2)
-        noise_energy = np.mean(img_gray[noi_lo:noi_hi, :] ** 2) + 1e-6
-
-        # Return the Ratio in dB
-        snr_db = 10 * np.log10(signal_energy / noise_energy)
-        return round(float(snr_db), 1)
-
-# --- MODULE 2: MARITIME ENGINE (GEOSPATIAL) ---
+# --- MODULE 3: MARITIME ENGINE ---
 class MaritimeEngine:
     def __init__(self, api_key):
         self.api_key = api_key
-        self.bbox = [[47.5, -124.8], [49.0, -122.2]]
-        self.hydro_pos = (48.1357, -122.7597) 
-        self.transformer = Transformer.from_crs("epsg:4326", "epsg:32610", always_xy=True)
-        self.h_x, self.h_y = self.transformer.transform(self.hydro_pos[1], self.hydro_pos[0])
+        self.bbox = [[48.0, -123.5], [48.5, -122.3]] 
+        self.hydro_pos = (48.1357, -122.7597)
 
     async def fetch_live_ais(self):
-        ships = []
+        ships = {}
         try:
-            async with websockets.connect("wss://stream.aisstream.io/v0/stream", open_timeout=12) as ws:
-                msg = {"APIKey": self.api_key, "BoundingBoxes": [self.bbox], 
-                       "FiltersShipTypes": [60, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80]}
-                await ws.send(json.dumps(msg))
-                start = asyncio.get_event_loop().time()
-                while asyncio.get_event_loop().time() - start < 4:
+            async with websockets.connect("wss://stream.aisstream.io/v0/stream", open_timeout=10) as ws:
+                await ws.send(json.dumps({"APIKey": self.api_key, "BoundingBoxes": [self.bbox]}))
+                start_time = time.time()
+                while time.time() - start_time < 5:
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
-                        data = json.loads(raw)
-                        if "MetaData" in data and "PositionReport" in data["Message"]:
-                            # Extracting Type and mapping to string
-                            type_code = data["MetaData"].get("ShipType", 0)
-                            ships.append({
-                                "Name": data["MetaData"]["ShipName"].strip(),
-                                "Type": SHIP_TYPE_MAP.get(type_code, f"Other ({type_code})"),
-                                "MMSI": data["MetaData"]["MMSI"],
-                                "Lat": data["MetaData"]["latitude"],
-                                "Lon": data["MetaData"]["longitude"],
-                                "SOG": data["Message"]["PositionReport"]["Sog"]
-                            })
+                        data = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
+                        mmsi = data["MetaData"]["MMSI"]
+                        if "PositionReport" in data["Message"]:
+                            ships[mmsi] = {
+                                "Name": data["MetaData"].get("ShipName", "Unknown").strip(),
+                                "Type": SHIP_TYPE_MAP.get(data["MetaData"].get("ShipType", 0), "Other"),
+                                "latitude": data["MetaData"]["latitude"],
+                                "longitude": data["MetaData"]["longitude"],
+                                "SOG": data["Message"]["PositionReport"].get("Sog", 0)
+                            }
                     except: break
         except: pass
-        return pd.DataFrame(ships).drop_duplicates('MMSI') if ships else pd.DataFrame()
+        return pd.DataFrame(ships.values()) if ships else pd.DataFrame()
 
-    def get_distance(self, lat, lon):
-        s_x, s_y = self.transformer.transform(lon, lat)
-        return round(float(np.sqrt((s_x - self.h_x)**2 + (s_y - self.h_y)**2) / 1000), 2)
+    def get_distance(self, lat2, lon2):
+        lat1, lon1 = self.hydro_pos
+        lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+        dlon, dlat = lon2 - lon1, lat2 - lat1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        return round(2 * asin(sqrt(a)) * 6371, 2)
 
-
+# --- MODULE 4: PHYSICS ANALYTICS ---
 class AnalyticsEngine:
     @staticmethod
-    def model_acoustic_footprint(source_level_db, threshold_db=100):
-        """
-        Numerical Step-Walking Model: Finds the radius where ship noise
-        meets the 100dB ambient floor using 20 Log R spreading.
-        """
-        # Search range up to 40km
-        distances = np.linspace(0.001, 40.0, 2000) 
-        
-        # Spherical Spreading Model: TL = 20 * log10(Range_m)
-        transmission_loss = 20 * np.log10(distances * 1000)
-        received_levels = source_level_db - transmission_loss
-        
-        # Find index where noise drops below threshold
-        masking_points = np.where(received_levels <= threshold_db)[0]
-        
-        if len(masking_points) > 0:
-            return distances[masking_points[0]]
-        return distances[-1] # Default to max range if still above threshold
+    def model_footprint(sl, threshold=100):
+        d = np.linspace(0.001, 40.0, 2000)
+        tl = 20 * np.log10(d * 1000)
+        masking = np.where((sl - tl) <= threshold)[0]
+        return d[masking[0]] if len(masking) > 0 else 40.0
 
-    def apply_ross_law_and_geometry(self, sog, dist_to_hydro):
-        """Calculates noise levels and habitat recovery area."""
+    def process_recovery(self, sog, dist):
         sog = float(sog)
-        # 1. Source Level Calculation
-        current_sl = 180 + (20 * np.log10(sog/15)) if sog > 0 else 0
-        reduction = 60 * np.log10(sog/7) if sog > 7 else 0
-        mitigated_sl = current_sl - reduction
+        sl_now = 180 + (20 * np.log10(sog/15)) if sog > 0 else 0
+        sl_slow = sl_now - (60 * np.log10(sog/7) if sog > 7 else 0)
+        r1, r2 = self.model_footprint(sl_now), self.model_footprint(sl_slow)
+        return round(sl_now, 1), round(max(0.1, np.pi * (r1**2 - r2**2)), 2)
 
-        # 2. Radius Calculation
-        r_transit = self.model_acoustic_footprint(current_sl)
-        r_slowdown = self.model_acoustic_footprint(mitigated_sl)
-
-        # 3. Area Calculation: Pi * (R1^2 - R2^2)
-        area_transit = np.pi * (r_transit**2)
-        area_slowdown = np.pi * (r_slowdown**2)
-        reclaimed_km2 = area_transit - area_slowdown
-
-        # 4. Limit results based on local distance
-        if float(dist_to_hydro) > 50.0:
-            return round(current_sl, 1), round(reduction, 1), 0.0
-
-        return round(current_sl, 1), round(reduction, 1), round(max(0.1, reclaimed_km2), 2)
-
-    @staticmethod
-    def get_vessel_status(sog, dist):
-        """
-        Categorizes vessel threat level based on speed and proximity.
-        Used for the tactical table status column.
-        """
-        sog, dist = float(sog), float(dist)
-        if sog <= 0.1: 
-            return "⚓ At Anchor/Docked"
-        if sog > 7.0 and dist <= 15.0: 
-            return "🔴 MASKING THREAT"
-        return "🟢 Safe Transit"
-
-
-# --- MODULE 4: INTERFACE ---
+# --- INTERFACE ---
 def run_app():
-    st.set_page_config(page_title="OrcaSafe Command", layout="wide")
-    st.title("🐋 OrcaSafe: Integrated Strategic Command Center")
+    st.set_page_config(page_title="OrcaSafe Command Center", layout="wide")
+    st.title("🐋 OrcaSafe: Continuous Strategic Command")
 
-    acoustic = AcousticEngine("orca_safe_brain.pth")
-    maritime = MaritimeEngine("75bacd06abfea55882806410bd628919ae733cba")
-    analytics = AnalyticsEngine()
+    if 'init' not in st.session_state:
+        st.session_state.fetcher = QuiltS3Fetcher()
+        st.session_state.acoustic = AcousticEngine("orca_safe_brain.pth")
+        st.session_state.maritime = MaritimeEngine("75bacd06abfea55882806410bd628919ae733cba")
+        st.session_state.analytics = AnalyticsEngine()
+        st.session_state.init = True
 
-    # UI Controls
     st.sidebar.header("🕹️ Controls")
-    data_mode = st.sidebar.radio("Data Mode", ["Live AIS Stream", "Historical Demo"])
-    category = st.sidebar.selectbox("Hydrophone Feed", ["Mixed", "Orca", "Noise"])
-    if st.sidebar.button("🔄 Refresh Data Feed"): st.rerun()
-
-    # PHASE 1: ACOUSTIC INTELLIGENCE
-    st.subheader("📡 Phase 1: Acoustic Intelligence")
-    path = f"Data/InferenceData/MixedInference/{category}"
-    files = [f for f in os.listdir(path) if f.endswith(".png")]
-    img_path = os.path.join(path, random.choice(files))
-    img = Image.open(img_path).convert("RGB")
     
-    col1, col2 = st.columns([2, 1])
-    with col1: st.image(img, use_container_width=True)
-    with col2:
-        prob = acoustic.run_inference(img)
-        snr = acoustic.calculate_visual_snr(img)
-        st.metric("AI Confidence", f"{prob:.1%}")
-        st.metric("Visual SNR Proxy", f"{snr} dB")
-        is_detected, is_masked = prob > 0.85, snr < 2.0 and snr > -2.0
-        if is_detected and is_masked: st.warning("⚠️ CRITICAL: MASKING ACTIVE")
-        elif is_detected: st.success("✅ CLEAR SIGNAL")
-        else: st.error("❌ NO DETECTION")
+    # Global Mode Selection
+    mode = st.sidebar.radio("Command Mode", ["Live Stream", "Historical Analysis"])
+    
+    # UNLOCKED: Maritime Source is now available for BOTH modes
+    st.sidebar.divider()
+    st.sidebar.subheader("Maritime Settings")
+    ship_mode = st.sidebar.radio("Maritime Data Source", ["Live AIS", "Historical Tactical (Ever Summit)"])
+    
+    if mode == "Historical Analysis":
+        st.sidebar.divider()
+        category = st.sidebar.selectbox("Signal Profile", ["Orca", "Mixed", "Noise"])
+        refresh_rate = st.sidebar.slider("Cycle Rate (s)", 5, 30, 10)
+    else:
+        category = None
+        refresh_rate = st.sidebar.slider("Cycle Rate (s)", 5, 30, 15)
 
-    # PHASE 2 & 3: TACTICAL RECOVERY
-    if is_detected and is_masked:
+    # 📡 PHASE 1: ACOUSTICS
+    img, status = None, ""
+    if mode == "Live Stream":
+        img, timestamp = st.session_state.fetcher.get_latest_spectrogram()
+        status = f"Live Signal: {timestamp}" if timestamp else "Syncing..."
+    else:
+        path = f"Data/InferenceData/MixedInference/{category}"
+        if os.path.exists(path) and os.listdir(path):
+            img = Image.open(os.path.join(path, random.choice([f for f in os.listdir(path) if not f.startswith('.')]))).convert("RGB")
+            status = f"Historical Profile: {category}"
+
+    if img:
+        st.subheader("📡 Phase 1: Acoustic Intelligence")
+        c1, c2 = st.columns([2, 1])
+        c1.image(img, use_container_width=True, caption=status)
+        prob = st.session_state.acoustic.run_inference(img)
+        with c2:
+            st.metric("AI Confidence", f"{prob:.1%}")
+            if prob > 0.85: st.success("✅ BIOLOGICAL DETECTED")
+            else: st.info("🔍 MONITORING...")
+
+        # 🚢 PHASE 2: HABITAT RECOVERY
         st.divider()
-        st.subheader("🚢 Phase 2 & 3: Tactical Habitat Recovery")
+        st.subheader(f"🚢 Habitat Recovery Analysis ({ship_mode})")
         
-        if data_mode == "Live AIS Stream":
-            with st.spinner("Connecting to Live AIS Telemetry..."):
-                df = asyncio.run(maritime.fetch_live_ais())
+        # Determine which data to show
+        if ship_mode == "Live AIS":
+            df = asyncio.run(st.session_state.maritime.fetch_live_ais())
         else:
-            df = pd.DataFrame([
-                {"Name": "Ever Summit", "Type": "Cargo", "SOG": 17.2, "Lat": 48.12, "Lon": -122.75}
-            ])
-
+            # Tactical Demo Data (Ever Summit)
+            df = pd.DataFrame([{"Name":"Ever Summit","SOG":17.2,"latitude":48.12,"longitude":-122.75}])
+        
         if not df.empty:
-            df['Dist'] = df.apply(lambda x: maritime.get_distance(x.Lat, x.Lon), axis=1)
-            results = df.apply(lambda row: pd.Series(analytics.apply_ross_law_and_geometry(row['SOG'], row['Dist'])), axis=1)
-            df[['SL', 'Savings', 'Reclaimed_km2']] = results
-            df['Status'] = df.apply(lambda x: analytics.get_vessel_status(x.SOG, x.Dist), axis=1)
-
-            st.metric("🌳 Total Habitat Reclaimed", f"{df['Reclaimed_km2'].sum():.1f} km²")
-
-            # Final Table with Ship Type Column
-            st.dataframe(
-                df[['Name', 'Type', 'Status', 'SOG', 'Dist', 'SL', 'Reclaimed_km2']].style.apply(
-                    lambda r: ['background-color: #ff4b4b; color: white' if r.Status == "🔴 MASKING THREAT" else '' for _ in r], axis=1
-                ),
-                use_container_width=True,
-                column_config={
-                    "Type": "Vessel Class",
-                    "SOG": st.column_config.NumberColumn("Speed (kts)", format="%.1f"),
-                    "Dist": st.column_config.NumberColumn("Dist (km)", format="%.1f"),
-                    "SL": st.column_config.NumberColumn("Source Level (dB)", format="%.1f"),
-                    "Reclaimed_km2": st.column_config.NumberColumn("Space Gained (km²)", format="%.1f")
-                }
-            )
+            df['Distance (km)'] = df.apply(lambda x: st.session_state.maritime.get_distance(x['latitude'], x['longitude']), axis=1)
+            phys = df.apply(lambda x: st.session_state.analytics.process_recovery(x['SOG'], x['Distance (km)']), axis=1)
+            df[['Source Level', 'Reclaimed (km²)']] = pd.DataFrame(phys.tolist(), index=df.index)
             
-            if st.button("🚀 EXECUTE SLOWDOWN"): st.balloons()
+            # RECOVERY DETAILS FIRST
+            st.metric("Total Potential Habitat Reclaimed", f"{df['Reclaimed (km²)'].sum():.1f} km²")
+            st.dataframe(df[['Name', 'SOG', 'Distance (km)', 'Source Level', 'Reclaimed (km²)']], use_container_width=True)
+            
+            # MAP SECOND
+            st.map(df)
+            
+            if st.button("🚀 EXECUTE SLOWDOWN PROTOCOL"): st.balloons()
         else:
-            st.info("No priority vessels found in the local basin.")
+            st.info("Tactical zone clear of vessel masking threats.")
 
-if __name__ == "__main__":
-    run_app()
+    # 🔄 AUTO-REFRESH
+    if mode == "Live Stream":
+        time.sleep(refresh_rate)
+        st.rerun()
+
+if __name__ == "__main__": run_app()
