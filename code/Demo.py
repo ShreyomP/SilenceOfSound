@@ -20,14 +20,36 @@ import time
 import subprocess
 import matplotlib.pyplot as plt
 from math import radians, cos, sin, asin, sqrt
+from enum import Enum
 
-# --- CONFIGURATION ---
+# --- SYSTEM CONFIGURATION ---
 FFMPEG_BINARY = "/opt/homebrew/bin/ffmpeg"
 SHIP_TYPE_MAP = {
     70: "Cargo", 71: "Cargo (Haz A)", 80: "Tanker", 60: "Passenger", 0: "Unknown"
 }
 
-# --- MODULE 1: DATA FETCHER ---
+# --- ENUMS FOR STANDARDIZED OPERATIONS ---
+class VesselSpeed(Enum):
+    CRUISE_FAST = 22.0  # Fast passenger/container
+    CRUISE_STD = 15.0   # Standard cargo
+    ECHO_SLOW = 7.0     # ECHO Program target speed
+    STATIONARY = 0.0    # At anchor/dock
+
+# --- AIS NAVIGATION STATUS MAPPING ---
+NAV_STATUS_MAP = {
+    0: "Underway (Engine)",
+    1: "At Anchor",
+    2: "Not Under Command",
+    3: "Restricted Maneuverability",
+    4: "Constrained by Draught",
+    5: "Moored",
+    6: "Aground",
+    7: "Engaged in Fishing",
+    8: "Underway (Sailing)",
+    15: "Undefined"
+}
+
+# --- MODULE 1: DATA ACQUISITION ---
 class QuiltS3Fetcher:
     def __init__(self):
         self.bucket_name = "audio-orcasound-net"
@@ -66,7 +88,7 @@ class QuiltS3Fetcher:
             return Image.open(buf).convert("RGB"), latest_obj['LastModified']
         except: return None, None
 
-# --- MODULE 2: AI ENGINE ---
+# --- MODULE 2: INFERENCE ENGINE ---
 class AcousticEngine:
     def __init__(self, model_path):
         self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -87,7 +109,7 @@ class AcousticEngine:
         tensor = self.transform(img).unsqueeze(0).to(self.device)
         with torch.no_grad(): return self.model(tensor).item()
 
-# --- MODULE 3: MARITIME ENGINE ---
+# --- MODULE 3: MARITIME TELEMETRY ---
 class MaritimeEngine:
     def __init__(self, api_key):
         self.api_key = api_key
@@ -105,12 +127,15 @@ class MaritimeEngine:
                         data = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
                         mmsi = data["MetaData"]["MMSI"]
                         if "PositionReport" in data["Message"]:
+                            nav_code = data["Message"]["PositionReport"].get("NavigationalStatus", 15)
+                            status_text = NAV_STATUS_MAP.get(nav_code, f"Status {nav_code}")
+                            
                             ships[mmsi] = {
                                 "Name": data["MetaData"].get("ShipName", "Unknown").strip(),
-                                "Type": SHIP_TYPE_MAP.get(data["MetaData"].get("ShipType", 0), "Other"),
                                 "latitude": data["MetaData"]["latitude"],
                                 "longitude": data["MetaData"]["longitude"],
-                                "SOG": data["Message"]["PositionReport"].get("Sog", 0)
+                                "SOG": data["Message"]["PositionReport"].get("Sog", 0),
+                                "Status": status_text
                             }
                     except: break
         except: pass
@@ -123,26 +148,33 @@ class MaritimeEngine:
         a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
         return round(2 * asin(sqrt(a)) * 6371, 2)
 
-# --- MODULE 4: PHYSICS ANALYTICS ---
+# --- MODULE 4: HABITAT ANALYTICS ---
 class AnalyticsEngine:
     @staticmethod
     def model_footprint(sl, threshold=100):
+        if sl <= threshold: return 0.0
         d = np.linspace(0.001, 40.0, 2000)
         tl = 20 * np.log10(d * 1000)
         masking = np.where((sl - tl) <= threshold)[0]
         return d[masking[0]] if len(masking) > 0 else 40.0
 
-    def process_recovery(self, sog, dist):
+    def process_recovery(self, sog):
         sog = float(sog)
-        sl_now = 180 + (20 * np.log10(sog/15)) if sog > 0 else 0
-        sl_slow = sl_now - (60 * np.log10(sog/7) if sog > 7 else 0)
+        # SOG Zero Fix
+        if sog <= 0.1: return 0.0, 0.0
+            
+        sl_now = 180 + (20 * np.log10(sog/15))
+        target_speed = VesselSpeed.ECHO_SLOW.value
+        sl_slow = sl_now - (60 * np.log10(sog/target_speed) if sog > target_speed else 0)
+        
         r1, r2 = self.model_footprint(sl_now), self.model_footprint(sl_slow)
-        return round(sl_now, 1), round(max(0.1, np.pi * (r1**2 - r2**2)), 2)
+        return round(sl_now, 1), round(max(0.0, np.pi * (r1**2 - r2**2)), 2)
 
-# --- INTERFACE ---
+# --- USER INTERFACE ---
 def run_app():
-    st.set_page_config(page_title="OrcaSafe Command Center", layout="wide")
-    st.title("🐋 OrcaSafe: Continuous Strategic Command")
+    st.set_page_config(page_title="OrcaSafe Tactical Interface", layout="wide")
+    st.title("OrcaSafe: Acoustic Mitigation Interface")
+    st.markdown("---")
 
     if 'init' not in st.session_state:
         st.session_state.fetcher = QuiltS3Fetcher()
@@ -151,75 +183,88 @@ def run_app():
         st.session_state.analytics = AnalyticsEngine()
         st.session_state.init = True
 
-    st.sidebar.header("🕹️ Controls")
-    
-    # Global Mode Selection
-    mode = st.sidebar.radio("Command Mode", ["Live Stream", "Historical Analysis"])
-    
-    # UNLOCKED: Maritime Source is now available for BOTH modes
-    st.sidebar.divider()
-    st.sidebar.subheader("Maritime Settings")
-    ship_mode = st.sidebar.radio("Maritime Data Source", ["Live AIS", "Historical Tactical (Ever Summit)"])
-    
-    if mode == "Historical Analysis":
-        st.sidebar.divider()
-        category = st.sidebar.selectbox("Signal Profile", ["Orca", "Mixed", "Noise"])
-        refresh_rate = st.sidebar.slider("Cycle Rate (s)", 5, 30, 10)
-    else:
-        category = None
-        refresh_rate = st.sidebar.slider("Cycle Rate (s)", 5, 30, 15)
+    st.sidebar.subheader("System Control Panel")
+    mode = st.sidebar.radio("Input Source", ["Live Stream", "Historical Baseline"])
+    ship_mode = st.sidebar.radio("AIS Data Source", ["Live AIS Stream", "Tactical Dataset (Ever Summit)"])
+    refresh_rate = st.sidebar.slider("Refresh Interval (s)", 5, 30, 15)
 
-    # 📡 PHASE 1: ACOUSTICS
-    img, status = None, ""
+    # Section 1: Acoustic Analysis
+    img, timestamp = None, None
     if mode == "Live Stream":
         img, timestamp = st.session_state.fetcher.get_latest_spectrogram()
-        status = f"Live Signal: {timestamp}" if timestamp else "Syncing..."
+        st.caption(f"Telemetry Synchronized: {timestamp}" if timestamp else "Synchronizing Signal...")
     else:
+        category = st.sidebar.selectbox("Signal Profile", ["Orca", "Mixed", "Noise"])
         path = f"Data/InferenceData/MixedInference/{category}"
         if os.path.exists(path) and os.listdir(path):
             img = Image.open(os.path.join(path, random.choice([f for f in os.listdir(path) if not f.startswith('.')]))).convert("RGB")
-            status = f"Historical Profile: {category}"
+            st.caption(f"Baseline Source: {category}")
 
     if img:
-        st.subheader("📡 Phase 1: Acoustic Intelligence")
-        c1, c2 = st.columns([2, 1])
-        c1.image(img, use_container_width=True, caption=status)
+        st.subheader("I. Acoustic Intelligence Analysis")
+        col_img, col_metrics = st.columns([2, 1])
+        col_img.image(img, use_container_width=True)
+        
         prob = st.session_state.acoustic.run_inference(img)
-        with c2:
-            st.metric("AI Confidence", f"{prob:.1%}")
-            if prob > 0.85: st.success("✅ BIOLOGICAL DETECTED")
-            else: st.info("🔍 MONITORING...")
-
-        # 🚢 PHASE 2: HABITAT RECOVERY
-        st.divider()
-        st.subheader(f"🚢 Habitat Recovery Analysis ({ship_mode})")
+        orca_detected = prob > 0.85
         
-        # Determine which data to show
-        if ship_mode == "Live AIS":
-            df = asyncio.run(st.session_state.maritime.fetch_live_ais())
-        else:
-            # Tactical Demo Data (Ever Summit)
-            df = pd.DataFrame([{"Name":"Ever Summit","SOG":17.2,"latitude":48.12,"longitude":-122.75}])
-        
-        if not df.empty:
-            df['Distance (km)'] = df.apply(lambda x: st.session_state.maritime.get_distance(x['latitude'], x['longitude']), axis=1)
-            phys = df.apply(lambda x: st.session_state.analytics.process_recovery(x['SOG'], x['Distance (km)']), axis=1)
-            df[['Source Level', 'Reclaimed (km²)']] = pd.DataFrame(phys.tolist(), index=df.index)
-            
-            # RECOVERY DETAILS FIRST
-            st.metric("Total Potential Habitat Reclaimed", f"{df['Reclaimed (km²)'].sum():.1f} km²")
-            st.dataframe(df[['Name', 'SOG', 'Distance (km)', 'Source Level', 'Reclaimed (km²)']], use_container_width=True)
-            
-            # MAP SECOND
-            st.map(df)
-            
-            if st.button("🚀 EXECUTE SLOWDOWN PROTOCOL"): st.balloons()
-        else:
-            st.info("Tactical zone clear of vessel masking threats.")
+        with col_metrics:
+            st.metric("Detection Confidence", f"{prob:.2%}")
+            if orca_detected:
+                st.error("ALERT: SRKW DETECTION CONFIRMED")
+            else:
+                st.info("STATUS: NO SRKW Detected")
 
-    # 🔄 AUTO-REFRESH
+        # --- CONDITIONAL TRIGGER: AIS & MITIGATION ---
+        st.markdown("---")
+        if orca_detected:
+            st.subheader(f"II. Mitigation Analysis: Active Response Mode")
+            
+            if ship_mode == "Live AIS Stream":
+                df = asyncio.run(st.session_state.maritime.fetch_live_ais())
+            else:
+                df = pd.DataFrame([{
+                    "Name":"Ever Summit",
+                    "SOG":17.2,
+                    "latitude":48.12,
+                    "longitude":-122.75,
+                    "Status": "Underway (Engine)"
+                }])
+            
+            if not df.empty:
+                df['Distance (km)'] = df.apply(lambda x: st.session_state.maritime.get_distance(x['latitude'], x['longitude']), axis=1)
+                phys = df.apply(lambda x: st.session_state.analytics.process_recovery(x['SOG']), axis=1)
+                df[['Source Level (dB)', 'Reclaimed Area (km²)']] = pd.DataFrame(phys.tolist(), index=df.index)
+                
+                st.metric("Total Cumulative Habitat Recovery", f"{df['Reclaimed Area (km²)'].sum():.1f} km²")
+                st.table(df[['Name', 'Status', 'SOG', 'Distance (km)', 'Source Level (dB)', 'Reclaimed Area (km²)']])
+                
+                # --- MAP HIGHLIGHTING LOGIC ---
+                # Vessel Markers (Red)
+                vessel_map_df = df[['latitude', 'longitude']].copy()
+                vessel_map_df['color'] = '#FF0000' 
+                
+                # Hydrophone Marker (Blue)
+                hydro_point = pd.DataFrame([{
+                    'latitude': 48.1357, 
+                    'longitude': -122.7597, 
+                    'color': '#0000FF' 
+                }])
+                
+                final_map_df = pd.concat([vessel_map_df, hydro_point], ignore_index=True)
+                st.map(final_map_df, color='color', size=20)
+                
+                if st.button("Execute Mitigation Protocol"):
+                    st.success("Protocol Signal Transmitted to Registered Vessels")
+            else:
+                st.info("No vessel-based masking threats detected in sector.")
+        else:
+            st.subheader("II. Mitigation Analysis: Standby Mode")
+            st.caption("Maritime telemetry and AIS correlation are suspended until a positive detection is confirmed.")
+
     if mode == "Live Stream":
         time.sleep(refresh_rate)
         st.rerun()
 
-if __name__ == "__main__": run_app()
+if __name__ == "__main__":
+    run_app()
