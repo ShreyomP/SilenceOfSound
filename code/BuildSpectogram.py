@@ -31,7 +31,7 @@ def process_pt_bout(timestamp):
    if not os.path.exists(local_folder): os.makedirs(local_folder)
 
 
-   # We'll look for the first 5 segments in the HLS folder for this timestamp
+   # We'll look for the first 5 segments in the FLAC folder for this timestamp
    prefix = f"{NODE}/flac/{timestamp}"
   
    try:

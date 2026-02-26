@@ -5,7 +5,7 @@ from PIL import Image
 import os
 
 # --- 1. SETTINGS ---
-TEST_FOLDER = 'inference/'  # Path to your folder of images
+TEST_FOLDER = 'data/inferencedata/MixedInference/noise'  # Path to your folder of images
 MODEL_PATH = 'orca_safe_brain.pth'
 IMAGE_SIZE = (224, 224)
 

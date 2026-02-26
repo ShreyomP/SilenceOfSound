@@ -58,37 +58,71 @@ class QuiltS3Fetcher:
 
     def get_latest_spectrogram(self):
         try:
-            lookback_start = int(time.time()) - (24 * 60 * 60)
+            # 1. Narrow the search window to the last 60 seconds
+            # S3 lists lexicographically; looking back 1 minute prevents 
+            # scanning thousands of older files.
+            lookback_start = int(time.time()) - 24*60*60
             start_after_key = f"{self.prefix}{lookback_start}.ts"
-            paginator = self.s3.get_paginator('list_objects_v2')
-            page_iterator = paginator.paginate(Bucket=self.bucket_name, Prefix=self.prefix, StartAfter=start_after_key)
-            
-            latest_obj = None
-            for page in page_iterator:
-                if "Contents" in page: latest_obj = page['Contents'][-1]
-            
-            if not latest_obj or latest_obj['Size'] < 1000: return None, None
-            
-            ts_file, wav_file = 'live_capture.ts', 'live_capture.wav'
-            self.s3.download_file(self.bucket_name, latest_obj['Key'], ts_file)
-            
-            subprocess.run([FFMPEG_BINARY, '-v', 'error', '-i', ts_file, '-ar', '22050', '-ac', '1', wav_file, '-y'], capture_output=True)
 
-            y, sr = librosa.load(wav_file, sr=22050)
+            # 2. Direct list call (faster than paginating through 24h of data)
+            response = self.s3.list_objects_v2(
+                Bucket=self.bucket_name,
+                Prefix=self.prefix,
+                StartAfter=start_after_key,
+                MaxKeys=1000 # Limit the response size for speed
+            )
+
+            if 'Contents' not in response or not response['Contents']:
+                # Fallback: if no files in last 60s, try 5 minutes
+                return None, None
+
+            # S3 returns keys in order; the last one is the most recent
+            latest_obj = response['Contents'][-1]
+            
+            # Ignore tiny/empty files (header only)
+            if latest_obj['Size'] < 1000: 
+                return None, None
+
+            # 3. Download to memory instead of disk
+            file_byte_string = self.s3.get_object(
+                Bucket=self.bucket_name, 
+                Key=latest_obj['Key']
+            )['Body'].read()
+
+            # 4. Use FFmpeg to convert TS to WAV in a memory pipe
+            # This avoids the "live_capture.ts" disk write latency
+            command = [
+                'ffmpeg', '-i', 'pipe:0', 
+                '-f', 'wav', '-ar', '22050', '-ac', '1', 
+                'pipe:1', '-v', 'error'
+            ]
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            out, _ = process.communicate(input=file_byte_string)
+
+            # 5. Load audio directly from the pipe output
+            y, sr = librosa.load(io.BytesIO(out), sr=22050)
+            
+            # 6. Generate Spectrogram
             S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=10000)
             S_dB = librosa.power_to_db(S, ref=np.max)
 
+            # 7. Render to Image buffer
             fig, ax = plt.subplots(figsize=(5, 5))
             plt.axis('off')
             librosa.display.specshow(S_dB, sr=sr, fmax=10000, ax=ax, cmap='magma')
+            
             buf = io.BytesIO()
             plt.savefig(buf, format='png', bbox_inches='tight', pad_inches=0)
             plt.close(fig)
             buf.seek(0)
+            
             return Image.open(buf).convert("RGB"), latest_obj['LastModified']
-        except: return None, None
 
-# --- MODULE 2: INFERENCE ENGINE ---
+        except Exception as e:
+            print(f"Error fetching latest spectrogram: {e}")
+            return None, None
+   
+   # --- MODULE 2: INFERENCE ENGINE ---
 class AcousticEngine:
     def __init__(self, model_path):
         self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
