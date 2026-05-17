@@ -58,38 +58,55 @@ class QuiltS3Fetcher:
 
     def get_latest_spectrogram(self):
         try:
-            # 1. Narrow the search window to the last 60 seconds
-            # S3 lists lexicographically; looking back 1 minute prevents 
-            # scanning thousands of older files.
-            lookback_start = int(time.time()) - 24*60*60
-            start_after_key = f"{self.prefix}{lookback_start}.ts"
-
-            # 2. Direct list call (faster than paginating through 24h of data)
-            response = self.s3.list_objects_v2(
+            # 1. Find the latest timestamp folder ("bucket") for the stream
+            # Look back 30 days to avoid paginating through years of old folders
+            lookback_folder = int(time.time()) - 30*24*60*60
+            start_after_folder = f"{self.prefix}{lookback_folder}/"
+            
+            folder_response = self.s3.list_objects_v2(
                 Bucket=self.bucket_name,
                 Prefix=self.prefix,
-                StartAfter=start_after_key,
-                MaxKeys=1000 # Limit the response size for speed
+                Delimiter='/',
+                StartAfter=start_after_folder
             )
-
-            if 'Contents' not in response or not response['Contents']:
-                # Fallback: if no files in last 60s, try 5 minutes
+            
+            prefixes = folder_response.get('CommonPrefixes', [])
+            if not prefixes:
+                # Fallback if no recent data
                 return None, None
+                
+            # The last prefix is the most recent timestamp folder
+            latest_folder = prefixes[-1]['Prefix']
 
-            # S3 returns keys in order; the last one is the most recent
-            latest_obj = response['Contents'][-1]
+            # 2. Fetch the live.m3u8 playlist from the latest folder
+            # This is significantly faster than paginating through thousands of .ts files
+            playlist_key = f"{latest_folder}live.m3u8"
+            
+            playlist_obj = self.s3.get_object(Bucket=self.bucket_name, Key=playlist_key)
+            playlist_content = playlist_obj['Body'].read().decode('utf-8')
+            
+            # 3. Parse the playlist to find the last .ts segment
+            ts_files = [line.strip() for line in playlist_content.split('\n') if line.strip().endswith('.ts')]
+            if not ts_files:
+                return None, None
+                
+            latest_ts_filename = ts_files[-1]
+            latest_ts_key = f"{latest_folder}{latest_ts_filename}"
+            
+            # Get metadata for the actual ts file
+            ts_head = self.s3.head_object(Bucket=self.bucket_name, Key=latest_ts_key)
             
             # Ignore tiny/empty files (header only)
-            if latest_obj['Size'] < 1000: 
+            if ts_head.get('ContentLength', 0) < 1000: 
                 return None, None
 
-            # 3. Download to memory instead of disk
+            # 4. Download to memory instead of disk
             file_byte_string = self.s3.get_object(
                 Bucket=self.bucket_name, 
-                Key=latest_obj['Key']
+                Key=latest_ts_key
             )['Body'].read()
 
-            # 4. Use FFmpeg to convert TS to WAV in a memory pipe
+            # 5. Use FFmpeg to convert TS to WAV in a memory pipe
             # This avoids the "live_capture.ts" disk write latency
             command = [
                 'ffmpeg', '-i', 'pipe:0', 
@@ -99,14 +116,14 @@ class QuiltS3Fetcher:
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             out, _ = process.communicate(input=file_byte_string)
 
-            # 5. Load audio directly from the pipe output
+            # 6. Load audio directly from the pipe output
             y, sr = librosa.load(io.BytesIO(out), sr=22050)
             
-            # 6. Generate Spectrogram
+            # 7. Generate Spectrogram
             S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=10000)
             S_dB = librosa.power_to_db(S, ref=np.max)
 
-            # 7. Render to Image buffer
+            # 8. Render to Image buffer
             fig, ax = plt.subplots(figsize=(5, 5))
             plt.axis('off')
             librosa.display.specshow(S_dB, sr=sr, fmax=10000, ax=ax, cmap='magma')
@@ -116,7 +133,7 @@ class QuiltS3Fetcher:
             plt.close(fig)
             buf.seek(0)
             
-            return Image.open(buf).convert("RGB"), latest_obj['LastModified']
+            return Image.open(buf).convert("RGB"), ts_head['LastModified']
 
         except Exception as e:
             print(f"Error fetching latest spectrogram: {e}")
@@ -156,11 +173,15 @@ class MaritimeEngine:
             async with websockets.connect("wss://stream.aisstream.io/v0/stream", open_timeout=10) as ws:
                 await ws.send(json.dumps({"APIKey": self.api_key, "BoundingBoxes": [self.bbox]}))
                 start_time = time.time()
-                while time.time() - start_time < 5:
+                
+                # Increased window to 10 seconds to better catch standard AIS broadcast intervals
+                while time.time() - start_time < 10: 
                     try:
                         data = json.loads(await asyncio.wait_for(ws.recv(), timeout=1.0))
-                        mmsi = data["MetaData"]["MMSI"]
-                        if "PositionReport" in data["Message"]:
+                        
+                        # Safety check: Ensure the message is actually a PositionReport
+                        if "MetaData" in data and "Message" in data and "PositionReport" in data["Message"]:
+                            mmsi = data["MetaData"]["MMSI"]
                             nav_code = data["Message"]["PositionReport"].get("NavigationalStatus", 15)
                             status_text = NAV_STATUS_MAP.get(nav_code, f"Status {nav_code}")
                             
@@ -171,8 +192,16 @@ class MaritimeEngine:
                                 "SOG": data["Message"]["PositionReport"].get("Sog", 0),
                                 "Status": status_text
                             }
-                    except: break
-        except: pass
+                    except asyncio.TimeoutError:
+                        # Continue waiting if no message arrived in this 1-second chunk
+                        continue 
+                    except json.JSONDecodeError:
+                        continue # Ignore badly formatted messages
+                        
+        except Exception as e:
+            # Actually print the error so you know if your API key or connection is failing!
+            print(f"AISStream Connection Error: {e}") 
+            
         return pd.DataFrame(ships.values()) if ships else pd.DataFrame()
 
     def get_distance(self, lat2, lon2):
