@@ -1,0 +1,36 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Operating System Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# Large Datasets & Audio files
+Data/
+Wavfiles/
+*.wav
+*.mp3
+*.ts
+
+# Models: only track the deployed production model
+models/*
+!models/orca_safe_brain.pth
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Local drafts and redundant scripts (preserved on disk, excluded from GitHub)
+training_and_eval/Training.py
+training_and_eval/TrainingPytorch_v2.py
+training_and_eval/test.py
+data_processing/Copyfiles.py
+Code/.gitignore
+

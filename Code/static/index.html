@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#070b13">
+    <meta name="description"
+        content="OrcaSafe: Real-time acoustic intelligence and AI-powered detection of orca presence and vessel noise mitigation in the Salish Sea.">
+    <title>OrcaSafe: Real-time Acoustic Orca Detection</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <link rel="stylesheet" href="/static/styles.css?v=1.9">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="floating-header">
+            <div class="logo">
+                <h1>OrcaSafe</h1>
+            </div>
+            <div class="status-pill" id="globalStatus">No Orca Detected</div>
+        </header>
+
+        <!-- Map -->
+        <div id="map"></div>
+
+        <!-- User Alert Modal -->
+        <div id="userAlertModal" class="user-alert-modal" style="display: none;">
+            <div class="user-alert-content">
+                <h3>MARITIME ALERT</h3>
+                <p>Acoustic sensors have confirmed the presence of orcas within a 6.5 km radius of current vessel
+                    location. In accordance with maritime conservation guidelines, all vessels are directed to
+                    reduce speed to a maximum of <strong>7 knots</strong> to prevent acoustic interference
+                    and vessel strikes.</p>
+                <button id="closeUserAlert">Acknowledge</button>
+            </div>
+        </div>
+
+        <!-- Info button and window -->
+        <div class="info-button" id="infoBtn">i</div>
+        <div class="info-window" id="infoWindow">
+            <div class="info-window-content">
+                <h2>About OrcaSafe</h2>
+
+                <section>
+                    <h3>What is it?</h3>
+                    <p>OrcaSafe is a real-time acoustic intelligence platform that uses deep learning to detect orca
+                        vocalizations. By tracking marine mammal presence, the platform helps mitigate vessel noise and
+                        prevent harmful encounters in the Salish Sea.</p>
+                </section>
+
+                <section>
+                    <h3>The Threat of Acoustic Masking</h3>
+                    <p>Acoustic masking occurs when anthropogenic (human-made) noise interferes with an animal's ability
+                        to hear crucial sounds. For Southern Resident Killer Whales, loud vessel noise masks their
+                        echolocation clicks and calls, severely limiting their ability to communicate, navigate, and
+                        hunt for Chinook salmon.</p>
+                </section>
+
+                <section>
+                    <h3>Speed & Noise Reduction</h3>
+                    <p>Reducing speed is the most effective way to lower underwater noise. The following table outlines
+                        estimated noise reductions based on vessel speed.</p>
+                    <table class="info-table">
+                        <thead>
+                            <tr>
+                                <th>Speed (Knots)</th>
+                                <th>Noise Reduction</th>
+                                <th>Energy Reduction (%) & Impact</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>15+ kts</td>
+                                <td>0 dB (Baseline)</td>
+                                <td>0%</td>
+                            </tr>
+                            <tr>
+                                <td>11 - 14 kts</td>
+                                <td>~ 2-3 dB</td>
+                                <td>~ 50% (Good enough for meaningful help to orcas)</td>
+                            </tr>
+                            <tr>
+                                <td>&lt; 11 kts</td>
+                                <td>~ 5-7 dB</td>
+                                <td>~ 75% (Great)</td>
+                            </tr>
+                            <tr>
+                                <td>&lt; 7 kts</td>
+                                <td>~ 10+ dB</td>
+                                <td>~ 90%+ (Great)</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </section>
+
+                <section>
+                    <h3>Guidelines for Vessel Pilots</h3>
+                    <p>Maintain standard navigation routes while monitoring the application. If an orca detection occurs
+                        and a vessel enters the alert radius, reduce speed to recommended guidelines to minimize
+                        acoustic interference.</p>
+                </section>
+
+                <button id="closeInfoBtn">Close Information</button>
+            </div>
+        </div>
+
+        <!-- Sliding Bottom Sheet for Details -->
+        <div id="detailsSheet" class="bottom-sheet">
+            <div class="sheet-handle"></div>
+            <h2 id="sheetNodeName">Hydrophone Details</h2>
+            <div class="sheet-content">
+                <div class="status-row">
+                    <div class="status-indicator">
+                        <div class="pulse-ring" id="pulseRing"></div>
+                        <div class="status-dot" id="statusDot"></div>
+                    </div>
+                    <div class="status-text-block">
+                        <h3 id="statusText">Listening...</h3>
+                        <p id="offlineNote" class="offline-note" style="display: none;">This node is currently offline
+                        </p>
+                        <p id="confidenceText">Confidence: --</p>
+                        <p id="timestampText" class="timestamp-text">Sync: --</p>
+                        <p id="distanceText" class="timestamp-text" style="color: var(--accent-blue);">Distance: --</p>
+                    </div>
+                    <button id="audioPlayBtn" class="audio-btn" style="display: none;" title="Play Live Audio">
+                        <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+                            <path d="M8 5v14l11-7z" />
+                        </svg>
+                    </button>
+                    <audio id="liveAudio" style="display: none;"></audio>
+                </div>
+
+                <div class="spectrogram-section">
+                    <h4>Live Acoustic Intelligence</h4>
+                    <div class="image-wrapper">
+                        <img id="spectrogramImage" src="" alt="Spectrogram" style="display: none;">
+                        <div id="imageLoader" class="loader">Loading stream...</div>
+                    </div>
+                </div>
+
+                <div id="vesselsSection" class="vessels-section" style="display: none;">
+                    <h4>Nearby Vessel Telemetry</h4>
+                    <div id="vesselsList" class="vessel-list">
+                        <!-- Dynamic vessel cards will be injected here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
+    <script src="/static/app.js?v=2.0"></script>
+</body>
+
+</html>
