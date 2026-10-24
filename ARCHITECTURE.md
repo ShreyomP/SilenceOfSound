@@ -21,30 +21,30 @@ The Southern Resident Killer Whale (SRKW) population has declined by **24%** fro
 ```mermaid
 flowchart TD
     subgraph Data_Ingestion["1. Live Acoustic Ingestion (Every 10s)"]
-        A[8 Salish Sea Hydrophone Nodes\nOrcasound AWS S3 Network] -->|HLS Live Stream| B[QuiltS3Fetcher\ncore/fetcher.py]
-        B -->|MPEG-TS 5-Second Slices| C[FFmpeg Subprocess Decoder]
+        A["8 Salish Sea Hydrophone Nodes<br/>Orcasound AWS S3 Network"] -->|HLS Live Stream| B["QuiltS3Fetcher<br/>core/fetcher.py"]
+        B -->|MPEG-TS 5-Second Slices| C["FFmpeg Subprocess Decoder"]
     end
 
     subgraph Signal_Processing["2. Digital Signal Processing (DSP)"]
-        C -->|PCM Audio 44.1 kHz| D[200 Hz High-Pass Butterworth Filter\nScipy sosfiltfilt]
-        D -->|Pre-emphasis 0.97| E[128-Band Mel-Spectrogram Generator\nLibrosa & Magma Colormap]
-        E -->|224x224 Normalized Matrix| F[Input Image Tensor]
+        C -->|PCM Audio 44.1 kHz| D["200 Hz High-Pass Butterworth Filter<br/>Scipy sosfiltfilt"]
+        D -->|Pre-emphasis 0.97| E["128-Band Mel-Spectrogram Generator<br/>Librosa & Magma Colormap"]
+        E -->|224x224 Normalized Matrix| F["Input Image Tensor"]
     end
 
-    subgraph ML_Inference["3. Low-Latency Neural Classification (< 0.8s)"]
-        F --> G[MobileNetV2 Transfer Learning Backbone\n9.8 MB Checkpoint | core/models.py]
-        G -->|Output Probability P| H{Detection Threshold\nP > 0.85?}
+    subgraph ML_Inference["3. Low-Latency Neural Classification (Under 0.8s)"]
+        F --> G["MobileNetV2 Transfer Learning Backbone<br/>9.8 MB Checkpoint - core/models.py"]
+        G -->|Output Probability P| H{"Detection Threshold<br/>P > 0.85?"}
     end
 
     subgraph Dynamic_Geofencing["4. Dynamic Geofencing & Alert Dispatch"]
-        H -->|Orca Confirmed| I[10 km Dynamic Slowdown Zone\nTriggered around Hydrophone]
-        I --> J[FastAPI Cloud Run Backend\n1 vCPU / 2 GB RAM | Code/api.py]
+        H -->|Orca Confirmed| I["10 km Dynamic Slowdown Zone<br/>Triggered around Hydrophone"]
+        I --> J["FastAPI Cloud Run Backend<br/>1 vCPU / 2 GB RAM - Code/api.py"]
     end
 
     subgraph Client_Interface["5. Interactive PWA Interface"]
-        J -->|JSON Payload + Base64 Spectrogram| K[Interactive Leaflet.js PWA\nMobile & Desktop | Code/static/]
-        K --> L[HTML5 Vessel Geolocation & Distance Tracking]
-        L --> M[Vessel Slowdown Alert to 11 Knots\nAudio Playback & Spectrogram Inspection]
+        J -->|JSON Payload + Base64 Spectrogram| K["Interactive Leaflet.js PWA<br/>Mobile & Desktop - Code/static/"]
+        K --> L["HTML5 Vessel Geolocation & Distance Tracking"]
+        L --> M["Vessel Slowdown Alert to 11 Knots<br/>Audio Playback & Spectrogram Inspection"]
     end
 ```
 
@@ -190,8 +190,8 @@ sequenceDiagram
             API->>S3: Fetch latest 5-second audio chunk
             S3->>S3: Apply 200 Hz High-Pass Filter + 128-Band Mel-Spectrogram
             S3-->>API: Normalized 224x224 tensor + Base64 PNG
-            API->>Model: Execute forward pass (< 0.8s)
-            Model-->>API: Probability P = 0.95 (> 0.85 Threshold)
+            API->>Model: Execute forward pass (under 0.8s)
+            Model-->>API: Probability P = 0.95 (Threshold 0.85 exceeded)
             API-->>Web: JSON { orca_detected: true, confidence: 0.95, node: "rpi_bush_point" }
         end
         Web->>Web: Update 10 km Flaring Circle & Check Vessel GPS Distance

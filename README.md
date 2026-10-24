@@ -46,11 +46,11 @@ OrcaSafe acts like an automated, dynamic **school-zone light for maritime shippi
 
 ```mermaid
 flowchart LR
-    A[8 Hydrophones\nOrcasound AWS S3] -->|10s Poll| B[FFmpeg & DSP\n200 Hz High-Pass]
-    B -->|128-Band Mel Spectrogram| C[MobileNetV2\nCNN Classifier]
-    C -->|Probability P > 0.85| D{Orca Detected?}
-    D -->|Yes| E[10 km Dynamic Geofence\nSlowdown Zone]
-    E -->|Real-Time Advisories| F[Interactive Leaflet PWA\nPhones & Bridge Screens]
+    A["8 Hydrophones<br/>Orcasound AWS S3"] -->|10s Poll| B["FFmpeg & DSP<br/>200 Hz High-Pass"]
+    B -->|128-Band Mel Spectrogram| C["MobileNetV2<br/>CNN Classifier"]
+    C -->|Threshold 0.85 Met| D{"Orca Detected?"}
+    D -->|Yes| E["10 km Dynamic Geofence<br/>Slowdown Zone"]
+    E -->|Real-Time Advisories| F["Interactive Leaflet PWA<br/>Phones & Bridge Screens"]
 ```
 
 > **Deep Dive Documentation**: For mathematical derivations, sequence diagrams, and module explanations, see [**`ARCHITECTURE.md`**](file:///Users/rituparnapaul/SilenceOfSound/ARCHITECTURE.md).
