@@ -15,9 +15,9 @@
 
 Watch the complete project overview, technical architecture walkthrough, and live app demonstration on YouTube:
 
-[![Watch OrcaSafe Video Tutorial](https://img.shields.io/badge/YouTube-Watch%20Video%20Demo-red?style=for-the-badge&logo=youtube)](https://youtu.be/4ec7q5aYNpM)
+[![Watch OrcaSafe Video Tutorial](https://img.shields.io/badge/YouTube-Watch%20Video%20Demo-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=WdgEy5Pq11g)
 
-**Direct Link:** [https://youtu.be/4ec7q5aYNpM](https://youtu.be/4ec7q5aYNpM)
+**Direct Link:** [https://www.youtube.com/watch?v=WdgEy5Pq11g](https://www.youtube.com/watch?v=WdgEy5Pq11g)
 
 ---
 
