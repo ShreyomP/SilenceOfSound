@@ -29,8 +29,9 @@ gcloud run deploy "$SERVICE_NAME" \
     --region="$GCP_REGION" \
     --project="$GCP_PROJECT_ID" \
     --allow-unauthenticated \
-    --memory=2Gi \
-    --cpu=1 \
+    --memory=4Gi \
+    --cpu=4 \
+    --no-cpu-throttling \
     --min-instances=1 \
     --max-instances=2
 

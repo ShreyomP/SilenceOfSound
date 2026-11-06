@@ -48,7 +48,7 @@ analytics = AnalyticsEngine()
 
 # In-memory cache per node to conserve CPU and avoid redundant S3/ML runs
 node_cache = {}
-CACHE_TTL_SECONDS = 30.0
+CACHE_TTL_SECONDS = 15.0
 _refreshing_nodes = set()
 
 def sync_process_node(node_id: str):
@@ -119,15 +119,21 @@ async def refresh_single_node(node: str):
         _refreshing_nodes.discard(node)
 
 async def background_cache_worker():
-    """Background task to pre-warm and continuously keep hydrophone cache hot in parallel."""
-    print("Pre-warming hydrophone node cache in parallel...")
-    tasks = [refresh_single_node(node_id) for node_id in HYDROPHONE_NODES]
+    """Background task to pre-warm and continuously keep hydrophone cache hot with bounded concurrency."""
+    print("Pre-warming hydrophone node cache with concurrency limit...")
+    sem = asyncio.Semaphore(4)
+
+    async def sem_refresh(node_id):
+        async with sem:
+            await refresh_single_node(node_id)
+
+    tasks = [sem_refresh(node_id) for node_id in HYDROPHONE_NODES]
     await asyncio.gather(*tasks, return_exceptions=True)
     print("Hydrophone node cache pre-warmed!")
 
     while True:
-        await asyncio.sleep(25)
-        tasks = [refresh_single_node(node_id) for node_id in HYDROPHONE_NODES]
+        await asyncio.sleep(15)
+        tasks = [sem_refresh(node_id) for node_id in HYDROPHONE_NODES]
         await asyncio.gather(*tasks, return_exceptions=True)
 
 @app.on_event("startup")
