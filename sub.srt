@@ -1,0 +1,103 @@
+1
+00:00:01,500 --> 00:00:06,200
+Hi, my name is Shreyom Paul, and this is the video for my app, OrcaSafe.
+
+2
+00:00:06,200 --> 00:00:11,500
+I'm here right now on a ferry in the Puget Sound, surrounded by the exact problem my app is trying to solve.
+
+3
+00:00:11,500 --> 00:00:17,200
+The heavy engine vibrations and underwater drone that you can feel through this video is a wall of noise these ships make
+
+4
+00:00:17,200 --> 00:00:21,800
+that physically blind our critically endangered Southern Resident killer whales.
+
+5
+00:00:22,800 --> 00:00:28,800
+The core problem I am tackling is simple: commercial vessel noise is drowning out an endangered orca population.
+
+6
+00:00:29,500 --> 00:00:36,000
+Since peaking at 98 individuals in 1995, the Southern Resident killer whales have dropped 24% to just 74 today,
+
+7
+00:00:36,000 --> 00:00:40,000
+driven by scarce prey, pollution, and of course, acoustic masking.
+
+8
+00:00:40,800 --> 00:00:47,000
+As you can see here, busy commercial shipping lanes cut directly through the whales' federally designated critical habitat.
+
+9
+00:00:47,800 --> 00:00:53,500
+And every one-decibel rise in ship noise cuts an orca's odds of catching prey by 12.5%,
+
+10
+00:00:53,500 --> 00:00:59,800
+muffling echolocation, weakening pod coordination, and driving whales away from prime feeding grounds.
+
+11
+00:01:00,500 --> 00:01:06,500
+Today's slowdown programs are voluntary and static, costing ships time even when no whales are around.
+
+12
+00:01:06,500 --> 00:01:13,000
+OrcaSafe acts like a dynamic school-zone light instead, using real-time AI on live hydrophone audio
+
+13
+00:01:13,000 --> 00:01:17,500
+to alert commercial vessel pilots to slow down only when orcas are actually detected.
+
+14
+00:01:17,800 --> 00:01:27,000
+And slowing down is highly effective: dropping ship speed from 18 to 11 knots can reduce underwater acoustic noise emitted by roughly 90%.
+
+15
+00:01:28,000 --> 00:01:37,000
+My five-phase training pipeline pulls raw Orcasound S3 audio, slices it into 5-second chunks, turns them into mel spectrograms,
+
+16
+00:01:37,000 --> 00:01:44,500
+and then trains a frozen MobileNetV2 classifier head on it—achieving 92.6% accuracy and 99.6% precision.
+
+17
+00:01:44,800 --> 00:01:54,500
+This is my custom-engineered PyTorch transfer learning pipeline, training my MobileNetV2 model to recognize distinct orca vocalizations with over 92% accuracy.
+
+18
+00:01:55,200 --> 00:02:02,000
+At runtime, every 10-second audio polling fetches live S3 audio chunks, runs DSP and inference via FastAPI on Cloud Run,
+
+19
+00:02:02,000 --> 00:02:07,500
+and returns a single JSON payload to the web client.
+
+20
+00:02:08,200 --> 00:02:18,000
+Ultimately, my model runs inside one lightweight Cloud Run container, linking live hydrophone streams and vessel telemetry directly to an interactive web alert map.
+
+21
+00:02:19,000 --> 00:02:22,200
+Now let's go to a demo of my app in action.
+
+22
+00:02:22,500 --> 00:02:28,000
+This is OrcaSafe, running live on the cloud. Every blue dot here is a hydrophone in the Salish Sea.
+
+23
+00:02:28,000 --> 00:02:34,500
+You can tap any node to see what it's hearing, like here at Sunset Bay, you can hear the live audio and see the spectrogram.
+
+24
+00:02:34,500 --> 00:02:40,000
+Every 10 seconds this audio is being scored. It's at below 85% right now, so it stays clear.
+
+25
+00:02:40,300 --> 00:02:47,000
+Now here, the map is lit up: Bush Point, 95% detection. An orca is here, so a slowdown alert's issued.
+
+26
+00:02:47,800 --> 00:02:57,500
+By connecting real-time acoustic detection with GPS, OrcaSafe ensures that our global commerce and marine life can share the same Sound.

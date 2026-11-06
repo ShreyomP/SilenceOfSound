@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -48,6 +49,7 @@ analytics = AnalyticsEngine()
 # In-memory cache per node to conserve CPU and avoid redundant S3/ML runs
 node_cache = {}
 CACHE_TTL_SECONDS = 30.0
+_refreshing_nodes = set()
 
 def sync_process_node(node_id: str):
     """Executes S3 audio download, decoding, and ML inference in a threadpool."""
@@ -58,27 +60,16 @@ def sync_process_node(node_id: str):
     prob = acoustic.run_inference(img)
     return prob, img_b64, timestamp, getattr(fetcher, 'playlist_url', None)
 
-@app.get("/api/nodes")
-async def get_nodes():
-    return {"nodes": list(HYDROPHONE_NODES.values())}
-
-@app.get("/api/status")
-async def get_status(node: str = "rpi_port_townsend"):
-    now = time.time()
-    if node in node_cache and (now - node_cache[node]["cached_at"]) < CACHE_TTL_SECONDS:
-        return node_cache[node]["data"]
-
-    # Run blocking S3/ffmpeg/model inference off the event loop
+async def compute_node_status(node: str):
+    """Executes S3 fetch, ML inference, and maritime telemetry for a node."""
     prob, img_b64, timestamp, playlist_url = await run_in_threadpool(sync_process_node, node)
 
     if prob is None:
-        response_data = {
+        return {
             "error": "Failed to fetch audio from S3 node",
             "offline": True,
             "node": node
         }
-        node_cache[node] = {"data": response_data, "cached_at": now}
-        return response_data
 
     orca_detected = prob > DETECTION_THRESHOLD
     vessels = []
@@ -92,7 +83,6 @@ async def get_status(node: str = "rpi_port_townsend"):
                 node_lng=node_info["lng"]
             )
             for v in raw_vessels:
-                # Measure distance from this detecting hydrophone
                 dist = maritime.get_distance(
                     node_info["lat"], node_info["lng"],
                     v["latitude"], v["longitude"]
@@ -105,7 +95,7 @@ async def get_status(node: str = "rpi_port_townsend"):
         except Exception as e:
             print(f"Error fetching AIS for {node}: {e}")
 
-    response_data = {
+    return {
         "node": node,
         "timestamp": timestamp.isoformat() if timestamp else None,
         "orca_detected": orca_detected,
@@ -115,5 +105,57 @@ async def get_status(node: str = "rpi_port_townsend"):
         "audio_url": playlist_url
     }
 
-    node_cache[node] = {"data": response_data, "cached_at": now}
-    return response_data
+async def refresh_single_node(node: str):
+    """Refreshes cache for a single node asynchronously."""
+    if node in _refreshing_nodes:
+        return
+    _refreshing_nodes.add(node)
+    try:
+        data = await compute_node_status(node)
+        node_cache[node] = {"data": data, "cached_at": time.time()}
+    except Exception as e:
+        print(f"Error updating cache for {node}: {e}")
+    finally:
+        _refreshing_nodes.discard(node)
+
+async def background_cache_worker():
+    """Background task to pre-warm and continuously keep hydrophone cache hot in parallel."""
+    print("Pre-warming hydrophone node cache in parallel...")
+    tasks = [refresh_single_node(node_id) for node_id in HYDROPHONE_NODES]
+    await asyncio.gather(*tasks, return_exceptions=True)
+    print("Hydrophone node cache pre-warmed!")
+
+    while True:
+        await asyncio.sleep(25)
+        tasks = [refresh_single_node(node_id) for node_id in HYDROPHONE_NODES]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(background_cache_worker())
+
+@app.get("/api/nodes")
+async def get_nodes():
+    return {"nodes": list(HYDROPHONE_NODES.values())}
+
+@app.get("/api/status/all")
+async def get_all_status():
+    """Returns all pre-cached station statuses in a single instant payload (<1ms)."""
+    return {node_id: node_cache[node_id]["data"] for node_id in node_cache}
+
+@app.get("/api/status")
+async def get_status(node: str = "rpi_port_townsend"):
+    now = time.time()
+    if node in node_cache:
+        cached_entry = node_cache[node]
+        # Fresh hit: return immediately (<1ms)
+        if (now - cached_entry["cached_at"]) < CACHE_TTL_SECONDS:
+            return cached_entry["data"]
+        # Stale hit: return immediately and update in background (Stale-While-Revalidate)
+        asyncio.create_task(refresh_single_node(node))
+        return cached_entry["data"]
+
+    # Cold miss (only occurs before initial warm-up completes): compute, cache, and return
+    data = await compute_node_status(node)
+    node_cache[node] = {"data": data, "cached_at": time.time()}
+    return data

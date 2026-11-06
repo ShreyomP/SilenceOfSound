@@ -31,6 +31,9 @@ venv/
 training_and_eval/Training.py
 training_and_eval/TrainingPytorch_v2.py
 training_and_eval/test.py
+training_and_eval/simulate_training.py
+training_and_eval/generate_detection_histogram.py
 data_processing/Copyfiles.py
 Code/.gitignore
+
 

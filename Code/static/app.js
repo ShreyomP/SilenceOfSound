@@ -92,13 +92,129 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // Fetch and Plot Hydrophones
+    // Handle status update for a specific node and update markers/alerts
+    function handleNodeStatusUpdate(nodeId, data) {
+        if (!hydrophoneMarkers[nodeId]) return;
+        const markerDiv = document.getElementById(`marker-${nodeId}`);
+
+        // Debounce transient noise: require 2 consecutive positive detections
+        if (!data.error && data.orca_detected) {
+            hydrophoneMarkers[nodeId].consecutiveDetections += 1;
+        } else {
+            hydrophoneMarkers[nodeId].consecutiveDetections = 0;
+        }
+
+        // Debounce transient noise: require 2 consecutive positive detections
+        const isConfirmedDetection = hydrophoneMarkers[nodeId].consecutiveDetections >= 2;
+        data.orca_detected = isConfirmedDetection;
+
+        const node = hydrophoneMarkers[nodeId].node;
+
+        if (isConfirmedDetection) {
+            // Trigger Map Animation
+            if (markerDiv) markerDiv.classList.add("alert");
+
+            // Draw circle if not exists
+            if (!orcaCircles[nodeId]) {
+                orcaCircles[nodeId] = L.circle([node.lat, node.lng], {
+                    color: '#ef4444',
+                    fillColor: '#ef4444',
+                    fillOpacity: 0.15,
+                    weight: 2,
+                    radius: 6500, // 6.5 km
+                    className: 'flaring-circle',
+                    interactive: false
+                }).addTo(map);
+            }
+
+            // Check distance to user
+            if (userLocation && !alertedNodes.has(nodeId)) {
+                const nodeLoc = L.latLng(node.lat, node.lng);
+                const dist = map.distance(userLocation, nodeLoc);
+                if (dist <= 6500) {
+                    userAlertModal.style.display = "flex";
+                    alertedNodes.add(nodeId);
+                }
+            }
+        } else {
+            if (markerDiv) markerDiv.classList.remove("alert");
+
+            // Remove circle if exists
+            if (orcaCircles[nodeId]) {
+                map.removeLayer(orcaCircles[nodeId]);
+                delete orcaCircles[nodeId];
+            }
+            alertedNodes.delete(nodeId);
+        }
+
+        // Handle offline / online map marker appearance
+        if (data.error || data.offline) {
+            if (markerDiv) markerDiv.classList.add("offline");
+        } else {
+            if (markerDiv) markerDiv.classList.remove("offline");
+        }
+
+        // Save status for UI updating
+        hydrophoneMarkers[nodeId].lastStatus = data;
+
+        // Re-evaluate global status pill & corner alert across all nodes
+        let anyOrcaDetected = false;
+        let closestDetectingNode = null;
+        let shortestDistance = Infinity;
+
+        for (const key in hydrophoneMarkers) {
+            const ns = hydrophoneMarkers[key].lastStatus;
+            if (ns && !ns.error && !ns.offline && ns.orca_detected) {
+                anyOrcaDetected = true;
+                const hNode = hydrophoneMarkers[key].node;
+
+                if (userLocation) {
+                    const hDist = map.distance(userLocation, L.latLng(hNode.lat, hNode.lng));
+                    if (hDist < shortestDistance) {
+                        shortestDistance = hDist;
+                        closestDetectingNode = hNode;
+                    }
+                } else if (!closestDetectingNode) {
+                    closestDetectingNode = hNode;
+                }
+            }
+        }
+
+        if (anyOrcaDetected) {
+            globalStatus.textContent = "ORCA DETECTED";
+            globalStatus.classList.add("alert");
+            globalStatus.style.cursor = "pointer";
+            globalStatus.title = "Click to view closest detecting hydrophone";
+            globalStatus.onclick = () => {
+                if (closestDetectingNode) openDetailsSheet(closestDetectingNode);
+            };
+        } else {
+            globalStatus.textContent = "No Orca Detected";
+            globalStatus.classList.remove("alert");
+            globalStatus.style.cursor = "default";
+            globalStatus.title = "";
+            globalStatus.onclick = null;
+        }
+
+        // If this node's sheet is currently open, update the sheet UI live
+        if (activeNodeId === nodeId) {
+            updateSheetUI(data);
+        }
+    }
+
+    // Fetch and Plot Hydrophones with instant pre-cached status
     async function initHydrophones() {
         try {
-            const res = await fetch("/api/nodes");
-            const data = await res.json();
+            // Fetch nodes list and bulk pre-warmed cache in parallel
+            const [nodesRes, statusRes] = await Promise.allSettled([
+                fetch("/api/nodes"),
+                fetch("/api/status/all")
+            ]);
 
-            data.nodes.forEach(node => {
+            const nodesData = nodesRes.status === "fulfilled" ? await nodesRes.value.json() : { nodes: [] };
+            const cachedStatuses = (statusRes.status === "fulfilled" && statusRes.value.ok) ? await statusRes.value.json() : {};
+
+            nodesData.nodes.forEach((node, index) => {
                 // Create custom marker
                 const icon = L.divIcon({
                     className: 'custom-div-icon',
@@ -121,8 +237,13 @@ document.addEventListener("DOMContentLoaded", () => {
                     consecutiveDetections: 0
                 };
 
-                // Start polling this node
-                pollNodeStatus(node.id);
+                // Immediately apply pre-warmed status if available (zero-lag initial load)
+                if (cachedStatuses[node.id]) {
+                    handleNodeStatusUpdate(node.id, cachedStatuses[node.id]);
+                }
+
+                // Stagger background polling across nodes to prevent network bursts
+                setTimeout(() => pollNodeStatus(node.id), index * 300);
                 pollingIntervals[node.id] = setInterval(() => pollNodeStatus(node.id), 10000);
             });
         } catch (err) {
@@ -137,113 +258,7 @@ document.addEventListener("DOMContentLoaded", () => {
         try {
             const res = await fetch(`/api/status?node=${nodeId}`);
             const data = await res.json();
-
-            const markerDiv = document.getElementById(`marker-${nodeId}`);
-
-            // Debounce transient noise: require 2 consecutive positive detections
-            if (!data.error && data.orca_detected) {
-                hydrophoneMarkers[nodeId].consecutiveDetections += 1;
-            } else {
-                hydrophoneMarkers[nodeId].consecutiveDetections = 0;
-            }
-
-            const isConfirmedDetection = hydrophoneMarkers[nodeId].consecutiveDetections >= 2;
-            data.orca_detected = isConfirmedDetection;
-
-            const node = hydrophoneMarkers[nodeId].node;
-
-            if (isConfirmedDetection) {
-                // Trigger Map Animation
-                if (markerDiv) markerDiv.classList.add("alert");
-
-                // Draw circle if not exists
-                if (!orcaCircles[nodeId]) {
-                    orcaCircles[nodeId] = L.circle([node.lat, node.lng], {
-                        color: '#ef4444',
-                        fillColor: '#ef4444',
-                        fillOpacity: 0.15,
-                        weight: 2,
-                        radius: 6500, // 6.5 km
-                        className: 'flaring-circle',
-                        interactive: false
-                    }).addTo(map);
-                }
-
-                // Check distance to user
-                if (userLocation && !alertedNodes.has(nodeId)) {
-                    const nodeLoc = L.latLng(node.lat, node.lng);
-                    const dist = map.distance(userLocation, nodeLoc);
-                    if (dist <= 6500) {
-                        userAlertModal.style.display = "flex";
-                        alertedNodes.add(nodeId);
-                    }
-                }
-            } else {
-                if (markerDiv) markerDiv.classList.remove("alert");
-
-                // Remove circle if exists
-                if (orcaCircles[nodeId]) {
-                    map.removeLayer(orcaCircles[nodeId]);
-                    delete orcaCircles[nodeId];
-                }
-                alertedNodes.delete(nodeId);
-            }
-
-            // Handle offline / online map marker appearance
-            if (data.error || data.offline) {
-                if (markerDiv) markerDiv.classList.add("offline");
-            } else {
-                if (markerDiv) markerDiv.classList.remove("offline");
-            }
-
-            // Save status for UI updating
-            hydrophoneMarkers[nodeId].lastStatus = data;
-
-            // Re-evaluate global status pill & corner alert across all nodes
-            // If multiple hydrophones detect an orca, select the one closest to the user
-            let anyOrcaDetected = false;
-            let closestDetectingNode = null;
-            let shortestDistance = Infinity;
-
-            for (const key in hydrophoneMarkers) {
-                const ns = hydrophoneMarkers[key].lastStatus;
-                if (ns && !ns.error && !ns.offline && ns.orca_detected) {
-                    anyOrcaDetected = true;
-                    const hNode = hydrophoneMarkers[key].node;
-
-                    if (userLocation) {
-                        const hDist = map.distance(userLocation, L.latLng(hNode.lat, hNode.lng));
-                        if (hDist < shortestDistance) {
-                            shortestDistance = hDist;
-                            closestDetectingNode = hNode;
-                        }
-                    } else if (!closestDetectingNode) {
-                        // Fallback if user geolocation is unavailable or denied
-                        closestDetectingNode = hNode;
-                    }
-                }
-            }
-
-            if (anyOrcaDetected) {
-                globalStatus.textContent = "ORCA DETECTED";
-                globalStatus.classList.add("alert");
-                globalStatus.style.cursor = "pointer";
-                globalStatus.title = "Click to view closest detecting hydrophone";
-                globalStatus.onclick = () => {
-                    if (closestDetectingNode) openDetailsSheet(closestDetectingNode);
-                };
-            } else {
-                globalStatus.textContent = "No Orca Detected";
-                globalStatus.classList.remove("alert");
-                globalStatus.style.cursor = "default";
-                globalStatus.title = "";
-                globalStatus.onclick = null;
-            }
-
-            // If this node's sheet is currently open, update the sheet UI live
-            if (activeNodeId === nodeId) {
-                updateSheetUI(data);
-            }
+            handleNodeStatusUpdate(nodeId, data);
         } catch (err) {
             console.error(`Error polling ${nodeId}`, err);
         }
@@ -292,9 +307,11 @@ document.addEventListener("DOMContentLoaded", () => {
             distanceText.textContent = `Distance: Unknown`;
         }
 
-        // Populate immediately with cached status if available
+        // Populate immediately with cached status if available, or trigger immediate fetch
         if (hydrophoneMarkers[node.id].lastStatus) {
             updateSheetUI(hydrophoneMarkers[node.id].lastStatus);
+        } else {
+            pollNodeStatus(node.id);
         }
     }
 

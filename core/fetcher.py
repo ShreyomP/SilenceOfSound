@@ -11,6 +11,9 @@ from datetime import datetime, timezone
 from .config import FFMPEG_BINARY
 from .spectrogram import generate_mel_spectrogram
 
+# Module-level cache to remember active stream session folders across requests
+_ACTIVE_FOLDER_CACHE = {}
+
 class QuiltS3Fetcher:
     def __init__(self, node="rpi_port_townsend"):
         self.node = node
@@ -19,52 +22,73 @@ class QuiltS3Fetcher:
         self.s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
         self.playlist_url = None
 
-    def get_latest_spectrogram(self):
-        try:
-            # Look back 2 hours; if empty, fall back to 24 hours
-            lookback = int(time.time()) - 2 * 3600
-            start_after = f"{self.prefix}{lookback}/"
+    def _discover_latest_folder(self):
+        """Scans S3 to discover the newest HLS session folder timestamp."""
+        # Look back 24 hours, and fall back to 7 days if node has a long-running stream session
+        lookback = int(time.time()) - 24 * 3600
+        start_after = f"{self.prefix}{lookback}/"
 
-            paginator = self.s3.get_paginator('list_objects_v2')
+        paginator = self.s3.get_paginator('list_objects_v2')
+        page_iterator = paginator.paginate(
+            Bucket=self.bucket_name,
+            Prefix=self.prefix,
+            Delimiter='/',
+            StartAfter=start_after
+        )
+
+        all_prefixes = []
+        for page in page_iterator:
+            for cp in page.get('CommonPrefixes', []):
+                all_prefixes.append(cp)
+
+        # Long-running stream session fallback (up to 7 days)
+        if not all_prefixes:
+            lookback = int(time.time()) - 7 * 86400
+            start_after = f"{self.prefix}{lookback}/"
             page_iterator = paginator.paginate(
                 Bucket=self.bucket_name,
                 Prefix=self.prefix,
                 Delimiter='/',
                 StartAfter=start_after
             )
-
-            all_prefixes = []
             for page in page_iterator:
                 for cp in page.get('CommonPrefixes', []):
                     all_prefixes.append(cp)
 
-            # Fall back to 24 hours if node hasn't updated in the last 2 hours
-            if not all_prefixes:
-                lookback = int(time.time()) - 24 * 3600
-                start_after = f"{self.prefix}{lookback}/"
-                page_iterator = paginator.paginate(
-                    Bucket=self.bucket_name,
-                    Prefix=self.prefix,
-                    Delimiter='/',
-                    StartAfter=start_after
-                )
-                for page in page_iterator:
-                    for cp in page.get('CommonPrefixes', []):
-                        all_prefixes.append(cp)
+        if not all_prefixes:
+            return None
 
-            if not all_prefixes:
-                return None, None, None
+        all_prefixes.sort(key=lambda p: p['Prefix'])
+        return all_prefixes[-1]['Prefix']
 
-            # Sort to ensure newest timestamped folder
-            all_prefixes.sort(key=lambda p: p['Prefix'])
-            folder = all_prefixes[-1]['Prefix']
-            playlist_key = f"{folder}live.m3u8"
+    def get_latest_spectrogram(self):
+        try:
+            folder = _ACTIVE_FOLDER_CACHE.get(self.node)
+
+            # Fast-path: try fetching live.m3u8 from the known cached folder
+            playlist_text = None
+            playlist_key = None
+            if folder:
+                try:
+                    playlist_key = f"{folder}live.m3u8"
+                    obj = self.s3.get_object(Bucket=self.bucket_name, Key=playlist_key)
+                    playlist_text = obj['Body'].read().decode('utf-8')
+                except Exception:
+                    folder = None  # Cache was invalid; fall back to discovery
+
+            # Slow-path: discover new folder if not in cache or if fetch failed
+            if not folder or not playlist_text:
+                folder = self._discover_latest_folder()
+                if not folder:
+                    return None, None, None
+                _ACTIVE_FOLDER_CACHE[self.node] = folder
+                playlist_key = f"{folder}live.m3u8"
+                playlist = self.s3.get_object(Bucket=self.bucket_name, Key=playlist_key)
+                playlist_text = playlist['Body'].read().decode('utf-8')
+
             self.playlist_url = f"https://{self.bucket_name}.s3.amazonaws.com/{playlist_key}"
 
-            playlist = self.s3.get_object(Bucket=self.bucket_name, Key=playlist_key)
-            text = playlist['Body'].read().decode('utf-8')
-
-            segments = [line.strip() for line in text.split('\n') if line.strip().endswith('.ts')]
+            segments = [line.strip() for line in playlist_text.split('\n') if line.strip().endswith('.ts')]
             if not segments:
                 return None, None, None
 
@@ -74,11 +98,12 @@ class QuiltS3Fetcher:
             if head.get('ContentLength', 0) < 1000:
                 return None, None, None
 
-            # Skip segments older than 15 minutes
+            # Skip segments older than 15 minutes; if stale, invalidate cached folder
             modified = head.get('LastModified')
             if modified:
                 age = (datetime.now(timezone.utc) - modified).total_seconds()
                 if age > 15 * 60:
+                    _ACTIVE_FOLDER_CACHE.pop(self.node, None)
                     return None, None, None
 
             raw = self.s3.get_object(Bucket=self.bucket_name, Key=ts_key)['Body'].read()
